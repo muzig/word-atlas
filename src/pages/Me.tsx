@@ -11,6 +11,7 @@ export function Me({ privateAvailable }: { privateAvailable: boolean }) {
   const progress = useStore((s) => s.progress);
   const settings = useStore((s) => s.settings);
   const saveError = useStore((s) => s.saveError);
+  const sync = useStore((s) => s.sync);
   const file = useRef<HTMLInputElement>(null);
 
   const stats = useMemo(() => {
@@ -181,7 +182,15 @@ export function Me({ privateAvailable }: { privateAvailable: boolean }) {
 
         <section className="panel">
           <h3 className="eyebrow">数据</h3>
-          <p className="muted">进度只存在这台设备的浏览器里：没有账号，没有服务器。换设备时，导出备份再导入即可。</p>
+          {sync === "off" ? (
+            <p className="muted">进度只存在这台设备的浏览器里：没有账号，没有服务器。换设备时，导出备份再导入即可。</p>
+          ) : (
+            <p className="muted">
+              进度保存在本机，并与自建服务器同步，打开同一网址的设备会自动合并。清空记录也会同步到其他设备。
+              <br />
+              同步状态：{{ syncing: "同步中…", ok: "已同步", error: "暂时连不上服务器，恢复后会自动补传" }[sync]}
+            </p>
+          )}
           {saveError && <p className="warn-text">浏览器拒绝保存（可能是隐私模式或空间已满）。请尽快导出备份。</p>}
           <div className="data-actions">
             <button className="btn btn-ghost" onClick={download}>

@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import type { Accent } from "../atlas/types";
+import { mergeDoc, type SyncDoc } from "./merge";
 import type { CardState, Grade } from "./srs";
 
 export type QuizKind = "meaning" | "picture" | "listen" | "spell";
@@ -178,16 +179,21 @@ export function sanitizeSettings(v: unknown): Settings {
 
 /* ---------- store ---------- */
 
+/** "off" means no sync server answered, which is the normal static deployment. */
+export type SyncStatus = "off" | "syncing" | "ok" | "error";
+
 interface State {
   progress: Progress;
   settings: Settings;
   saveError: boolean;
+  sync: SyncStatus;
 }
 
 let state: State = {
   progress: emptyProgress("word-atlas-open"),
   settings: sanitizeSettings(read(SETTINGS_KEY)),
   saveError: false,
+  sync: "off",
 };
 const listeners = new Set<() => void>();
 let saveTimer: number | undefined;
@@ -216,11 +222,115 @@ export function flush() {
     state = { ...state, saveError: !ok };
     emit();
   }
+  scheduleSync(2000);
+}
+
+/* ---------- server sync (only when the page is served together with /api/sync) ---------- */
+
+const SYNC_API = `${import.meta.env?.BASE_URL ?? "/"}api/sync/`;
+const syncKey = (id: string) => `word-atlas:sync:${id}`;
+/** The last doc both this device and the server agreed on, used as the merge base. */
+interface SyncBase {
+  rev: number;
+  doc: SyncDoc;
+}
+/** null until the first request tells whether a sync server exists. */
+let syncAvailable: boolean | null = null;
+let syncTimer: number | undefined;
+let syncing = false;
+let syncAgain = false;
+
+function setSync(sync: SyncStatus) {
+  if (state.sync === sync) return;
+  state = { ...state, sync };
+  emit();
+}
+
+const cleanDoc = (doc: unknown, id: string): SyncDoc => {
+  const d = isObj(doc) ? doc : {};
+  return { progress: sanitizeProgress(d.progress, id), settings: sanitizeSettings(d.settings) };
+};
+
+/** Take the merged result locally without counting it as a local edit. */
+function adopt(doc: SyncDoc) {
+  if (JSON.stringify(doc) === JSON.stringify({ progress: state.progress, settings: state.settings })) return;
+  state = { ...state, progress: doc.progress, settings: doc.settings };
+  write(progressKey(doc.progress.datasetId), doc.progress);
+  write(SETTINGS_KEY, doc.settings);
+  emit();
+}
+
+async function syncJson(res: Response) {
+  if (!res.headers.get("content-type")?.includes("application/json")) throw new TypeError("no sync server");
+  return (await res.json()) as { rev: number; doc?: unknown };
+}
+
+function scheduleSync(delay = 0) {
+  if (typeof window === "undefined" || syncAvailable === false) return;
+  window.clearTimeout(syncTimer);
+  syncTimer = window.setTimeout(() => void syncNow(), delay);
+}
+
+export async function syncNow() {
+  const id = loadedId;
+  if (!id || syncAvailable === false) return;
+  if (syncing) {
+    syncAgain = true;
+    return;
+  }
+  syncing = true;
+  flush();
+  window.clearTimeout(syncTimer);
+  setSync("syncing");
+  try {
+    const raw = read<SyncBase>(syncKey(id));
+    const saved = raw && num(raw.rev, 1) ? { rev: raw.rev, doc: cleanDoc(raw.doc, id) } : null;
+    const got = await fetch(`${SYNC_API}${encodeURIComponent(id)}?rev=${saved?.rev ?? 0}`, { cache: "no-store" });
+    const head = await syncJson(got);
+    if (!got.ok) throw new Error(`sync ${got.status}`);
+    syncAvailable = true;
+    let remote: SyncBase | null = head.doc ? { rev: head.rev, doc: cleanDoc(head.doc, id) } : head.rev && head.rev === saved?.rev ? saved : null;
+    for (let tries = 0; tries < 3 && loadedId === id; tries++) {
+      const merged = mergeDoc(saved?.doc ?? null, { progress: state.progress, settings: state.settings }, remote?.doc ?? null);
+      adopt(merged);
+      if (remote && JSON.stringify(merged) === JSON.stringify(remote.doc)) {
+        write(syncKey(id), { rev: remote.rev, doc: merged });
+        break;
+      }
+      const put = await fetch(`${SYNC_API}${encodeURIComponent(id)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ baseRev: remote?.rev ?? 0, doc: merged }),
+      });
+      const body = await syncJson(put);
+      if (put.ok) {
+        write(syncKey(id), { rev: body.rev, doc: merged });
+        break;
+      }
+      // Another device pushed first: merge on top of its version and try again.
+      if (put.status !== 409) throw new Error(`sync ${put.status}`);
+      remote = { rev: body.rev, doc: cleanDoc(body.doc, id) };
+    }
+    setSync("ok");
+  } catch (e) {
+    if (syncAvailable === null && e instanceof TypeError) {
+      syncAvailable = false;
+      setSync("off");
+    } else setSync("error");
+  } finally {
+    syncing = false;
+    if (syncAgain) {
+      syncAgain = false;
+      scheduleSync();
+    }
+  }
 }
 
 if (typeof window !== "undefined") {
   window.addEventListener("pagehide", flush);
-  document.addEventListener("visibilitychange", () => document.visibilityState === "hidden" && flush());
+  document.addEventListener("visibilitychange", () => (document.visibilityState === "hidden" ? flush() : scheduleSync()));
+  window.addEventListener("online", () => scheduleSync());
+  window.setInterval(() => document.visibilityState === "visible" && scheduleSync(), 60_000);
   // Another tab saved: adopt its data instead of keeping a stale copy.
   window.addEventListener("storage", (e) => {
     if (!e.newValue) return;
@@ -247,6 +357,7 @@ export const store = {
     state = { ...state, progress: sanitizeProgress(read(progressKey(datasetId)), datasetId) };
     loadedId = datasetId;
     emit();
+    scheduleSync();
   },
   progress(fn: (p: Progress) => Progress) {
     state = { ...state, progress: fn(state.progress) };
