@@ -482,6 +482,31 @@ export function toggleBookmark(id: string) {
 
 /* ---------- profile management ---------- */
 
+export interface ProfileSummary {
+  /** False when this profile has never been opened on this device, so the numbers are unknown here. */
+  known: boolean;
+  learned: number;
+  dueToday: number;
+  startLevel: number;
+}
+
+/** Numbers for the profile switcher, read from this device's storage without switching. */
+export function profileSummary(id: string): ProfileSummary {
+  const datasetId = state.progress.datasetId;
+  const raw = id === state.profile ? state.progress : read(progressKey(datasetId, id));
+  const settings = id === state.profile ? state.settings : read(settingsKey(id));
+  const progress = sanitizeProgress(raw, datasetId);
+  const end = new Date();
+  end.setHours(23, 59, 59, 999);
+  const cards = Object.values(progress.cards);
+  return {
+    known: raw !== null || settings !== null,
+    learned: cards.length,
+    dueToday: cards.filter((c) => c.due <= end.getTime()).length,
+    startLevel: sanitizeSettings(settings).startLevel,
+  };
+}
+
 const profileName = (name: string) => name.trim().slice(0, 20);
 
 export function createProfile(name: string) {

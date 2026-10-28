@@ -18,6 +18,7 @@ import { EntryView } from "./ui/EntryView";
 import { AmbienceController, AmbiencePicker } from "./ui/Ambience";
 import { Logo } from "./ui/Logo";
 import { Palette } from "./ui/Palette";
+import { ProfileSwitcher } from "./ui/ProfileSwitcher";
 import { Sheet } from "./ui/Sheet";
 import { shouldShowSplash, Splash } from "./ui/Splash";
 import { Toasts } from "./ui/Toast";
@@ -148,6 +149,7 @@ function Shell({ privateAvailable }: { privateAvailable: boolean }) {
             <a className="icon-btn hide-sm" href="#/about" aria-label="关于与开源" title="关于与开源">
               <Github size={19} />
             </a>
+            <ProfileSwitcher />
           </div>
         </header>
       )}
