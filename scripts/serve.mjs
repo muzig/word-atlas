@@ -49,6 +49,7 @@ const putDoc = db.prepare(`
   ON CONFLICT (user, dataset) DO UPDATE SET rev = rev + 1, doc = excluded.doc, updated_at = excluded.updated_at
   RETURNING rev
 `);
+const deleteDoc = db.prepare("DELETE FROM docs WHERE user = ? AND dataset = ?");
 
 const TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -97,6 +98,11 @@ async function sync(req, res, dataset) {
     const known = Number(new URL(req.url, "http://x").searchParams.get("rev"));
     return json(res, 200, known === rev ? { rev } : { rev, doc: row ? JSON.parse(row.doc) : undefined });
   }
+  if (req.method === "DELETE") {
+    if (dataset === "profiles") return json(res, 400, { error: "doc" });
+    deleteDoc.run(user, dataset);
+    return json(res, 200, { rev: 0 });
+  }
   if (req.method !== "PUT") return json(res, 405, { error: "method" });
   let body;
   try {
@@ -105,7 +111,9 @@ async function sync(req, res, dataset) {
     return json(res, 400, { error: "body" });
   }
   const doc = body?.doc;
-  if (!doc || typeof doc !== "object" || typeof doc.progress !== "object" || typeof doc.settings !== "object") return json(res, 400, { error: "doc" });
+  // "profiles" holds the learner's profile list; every other key is one profile's progress in one dataset.
+  const valid = dataset === "profiles" ? Array.isArray(doc?.profiles) : doc && typeof doc.progress === "object" && typeof doc.settings === "object";
+  if (!valid) return json(res, 400, { error: "doc" });
   // Optimistic concurrency: the client must have merged the latest revision first.
   if (body.baseRev !== rev) return json(res, 409, { rev, doc: row ? JSON.parse(row.doc) : undefined });
   const next = putDoc.get(user, dataset, JSON.stringify(doc), Date.now());

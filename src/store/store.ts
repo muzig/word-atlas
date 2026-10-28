@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 import type { Accent } from "../atlas/types";
-import { mergeDoc, type SyncDoc } from "./merge";
+import { mergeDoc, mergeProfiles, type SyncDoc } from "./merge";
 import type { CardState, Grade } from "./srs";
 
 export type QuizKind = "meaning" | "picture" | "listen" | "spell";
@@ -93,8 +93,23 @@ export const emptyProgress = (datasetId: string): Progress => ({
 export const dayKey = (d = new Date()) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 
-const SETTINGS_KEY = "word-atlas:settings";
-const progressKey = (id: string) => `word-atlas:v2:${id}`;
+/* ---------- profiles: separate learners or study tracks, each with its own progress and settings ---------- */
+
+export interface Profile {
+  id: string;
+  name: string;
+  /** Last change, so the list merges across devices (newest edit wins). */
+  at: number;
+  deleted?: boolean;
+}
+export const DEFAULT_PROFILE = "default";
+const PROFILES_KEY = "word-atlas:profiles";
+/** Which profile this device uses. Deliberately per device, never synced. */
+const ACTIVE_KEY = "word-atlas:profile";
+// The default profile keeps the original keys, so existing progress needs no migration.
+const scoped = (key: string, profile: string) => (profile === DEFAULT_PROFILE ? key : `${key}@${profile}`);
+const settingsKey = (profile: string) => scoped("word-atlas:settings", profile);
+const progressKey = (id: string, profile: string) => scoped(`word-atlas:v2:${id}`, profile);
 
 function read<T>(key: string): T | null {
   try {
@@ -158,6 +173,16 @@ export function sanitizeProgress(v: unknown, datasetId: string): Progress {
   return out;
 }
 
+export function sanitizeProfiles(v: unknown): Profile[] {
+  const out: Profile[] = [];
+  if (Array.isArray(v))
+    for (const p of v.slice(0, 50))
+      if (isObj(p) && typeof p.id === "string" && /^[a-z0-9]{1,16}$/.test(p.id) && typeof p.name === "string" && num(p.at, 0) && !out.some((o) => o.id === p.id))
+        out.push({ id: p.id, name: p.name.trim().slice(0, 20) || "未命名", at: p.at as number, ...(p.deleted === true ? { deleted: true } : {}) });
+  if (!out.some((p) => p.id === DEFAULT_PROFILE)) out.unshift({ id: DEFAULT_PROFILE, name: "我", at: 0 });
+  return out;
+}
+
 export function sanitizeSettings(v: unknown): Settings {
   const s = { ...defaultSettings };
   if (!isObj(v)) return s;
@@ -187,13 +212,21 @@ interface State {
   settings: Settings;
   saveError: boolean;
   sync: SyncStatus;
+  profile: string;
+  profiles: Profile[];
 }
+
+const initialProfiles = sanitizeProfiles(read(PROFILES_KEY));
+const storedProfile = read<string>(ACTIVE_KEY);
+const initialProfile = initialProfiles.some((p) => p.id === storedProfile && !p.deleted) ? (storedProfile as string) : DEFAULT_PROFILE;
 
 let state: State = {
   progress: emptyProgress("word-atlas-open"),
-  settings: sanitizeSettings(read(SETTINGS_KEY)),
+  settings: sanitizeSettings(read(settingsKey(initialProfile))),
   saveError: false,
   sync: "off",
+  profile: initialProfile,
+  profiles: initialProfiles,
 };
 const listeners = new Set<() => void>();
 let saveTimer: number | undefined;
@@ -216,8 +249,8 @@ export function flush() {
   window.clearTimeout(saveTimer);
   if (!dirty) return;
   dirty = false;
-  const progressOk = loadedId !== state.progress.datasetId || write(progressKey(state.progress.datasetId), state.progress);
-  const ok = progressOk && write(SETTINGS_KEY, state.settings);
+  const progressOk = loadedId !== state.progress.datasetId || write(progressKey(state.progress.datasetId, state.profile), state.progress);
+  const ok = progressOk && write(settingsKey(state.profile), state.settings);
   if (ok === state.saveError) {
     state = { ...state, saveError: !ok };
     emit();
@@ -228,7 +261,9 @@ export function flush() {
 /* ---------- server sync (only when the page is served together with /api/sync) ---------- */
 
 const SYNC_API = `${import.meta.env?.BASE_URL ?? "/"}api/sync/`;
-const syncKey = (id: string) => `word-atlas:sync:${id}`;
+const syncKey = (id: string, profile: string) => scoped(`word-atlas:sync:${id}`, profile);
+/** Server doc key; the profile list itself lives under "profiles". */
+const remoteKey = (id: string, profile: string) => encodeURIComponent(profile === DEFAULT_PROFILE ? id : `${id}--${profile}`);
 /** The last doc both this device and the server agreed on, used as the merge base. */
 interface SyncBase {
   rev: number;
@@ -255,9 +290,41 @@ const cleanDoc = (doc: unknown, id: string): SyncDoc => {
 function adopt(doc: SyncDoc) {
   if (JSON.stringify(doc) === JSON.stringify({ progress: state.progress, settings: state.settings })) return;
   state = { ...state, progress: doc.progress, settings: doc.settings };
-  write(progressKey(doc.progress.datasetId), doc.progress);
-  write(SETTINGS_KEY, doc.settings);
+  write(progressKey(doc.progress.datasetId, state.profile), doc.progress);
+  write(settingsKey(state.profile), doc.settings);
   emit();
+}
+
+function setProfiles(profiles: Profile[]) {
+  if (JSON.stringify(profiles) === JSON.stringify(state.profiles)) return;
+  write(PROFILES_KEY, profiles);
+  state = { ...state, profiles };
+  emit();
+  // Deleted on another device: fall back instead of writing into a removed profile.
+  if (!profiles.some((p) => p.id === state.profile && !p.deleted)) store.useProfile(DEFAULT_PROFILE);
+}
+
+/** The list is tiny, so it is always fetched whole and merged per profile (newest edit wins). */
+async function syncProfiles() {
+  const got = await fetch(`${SYNC_API}profiles?rev=-1`, { cache: "no-store" });
+  const head = await syncJson(got);
+  if (!got.ok) throw new Error(`sync ${got.status}`);
+  syncAvailable = true;
+  let remote = { rev: head.rev, list: sanitizeProfiles(isObj(head.doc) ? head.doc.profiles : null) };
+  for (let tries = 0; tries < 3; tries++) {
+    const merged = mergeProfiles(state.profiles, remote.list);
+    setProfiles(merged);
+    if (JSON.stringify(merged) === JSON.stringify(remote.list)) return;
+    const put = await fetch(`${SYNC_API}profiles`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ baseRev: remote.rev, doc: { profiles: merged } }),
+    });
+    const body = await syncJson(put);
+    if (put.ok) return;
+    if (put.status !== 409) throw new Error(`sync ${put.status}`);
+    remote = { rev: body.rev, list: sanitizeProfiles(isObj(body.doc) ? body.doc.profiles : null) };
+  }
 }
 
 async function syncJson(res: Response) {
@@ -283,28 +350,32 @@ export async function syncNow() {
   window.clearTimeout(syncTimer);
   setSync("syncing");
   try {
-    const raw = read<SyncBase>(syncKey(id));
+    await syncProfiles();
+    const pid = state.profile;
+    const baseKey = syncKey(id, pid);
+    const raw = read<SyncBase>(baseKey);
     const saved = raw && num(raw.rev, 1) ? { rev: raw.rev, doc: cleanDoc(raw.doc, id) } : null;
-    const got = await fetch(`${SYNC_API}${encodeURIComponent(id)}?rev=${saved?.rev ?? 0}`, { cache: "no-store" });
+    const got = await fetch(`${SYNC_API}${remoteKey(id, pid)}?rev=${saved?.rev ?? 0}`, { cache: "no-store" });
     const head = await syncJson(got);
     if (!got.ok) throw new Error(`sync ${got.status}`);
     syncAvailable = true;
     let remote: SyncBase | null = head.doc ? { rev: head.rev, doc: cleanDoc(head.doc, id) } : head.rev && head.rev === saved?.rev ? saved : null;
-    for (let tries = 0; tries < 3 && loadedId === id; tries++) {
+    // Stop if the learner switched dataset or profile while a request was in flight.
+    for (let tries = 0; tries < 3 && loadedId === id && state.profile === pid; tries++) {
       const merged = mergeDoc(saved?.doc ?? null, { progress: state.progress, settings: state.settings }, remote?.doc ?? null);
       adopt(merged);
       if (remote && JSON.stringify(merged) === JSON.stringify(remote.doc)) {
-        write(syncKey(id), { rev: remote.rev, doc: merged });
+        write(baseKey, { rev: remote.rev, doc: merged });
         break;
       }
-      const put = await fetch(`${SYNC_API}${encodeURIComponent(id)}`, {
+      const put = await fetch(`${SYNC_API}${remoteKey(id, pid)}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ baseRev: remote?.rev ?? 0, doc: merged }),
       });
       const body = await syncJson(put);
       if (put.ok) {
-        write(syncKey(id), { rev: body.rev, doc: merged });
+        write(baseKey, { rev: body.rev, doc: merged });
         break;
       }
       // Another device pushed first: merge on top of its version and try again.
@@ -335,9 +406,10 @@ if (typeof window !== "undefined") {
   window.addEventListener("storage", (e) => {
     if (!e.newValue) return;
     try {
-      if (e.key === SETTINGS_KEY) state = { ...state, settings: sanitizeSettings(JSON.parse(e.newValue)) };
-      else if (e.key === progressKey(state.progress.datasetId))
+      if (e.key === settingsKey(state.profile)) state = { ...state, settings: sanitizeSettings(JSON.parse(e.newValue)) };
+      else if (e.key === progressKey(state.progress.datasetId, state.profile))
         state = { ...state, progress: sanitizeProgress(JSON.parse(e.newValue), state.progress.datasetId) };
+      else if (e.key === PROFILES_KEY) state = { ...state, profiles: sanitizeProfiles(JSON.parse(e.newValue)) };
       else return;
       emit();
     } catch {
@@ -354,8 +426,22 @@ export const store = {
   },
   useDataset(datasetId: string) {
     flush();
-    state = { ...state, progress: sanitizeProgress(read(progressKey(datasetId)), datasetId) };
+    state = { ...state, progress: sanitizeProgress(read(progressKey(datasetId, state.profile)), datasetId) };
     loadedId = datasetId;
+    emit();
+    scheduleSync();
+  },
+  useProfile(id: string) {
+    if (id === state.profile || !state.profiles.some((p) => p.id === id && !p.deleted)) return;
+    flush();
+    write(ACTIVE_KEY, id);
+    const datasetId = state.progress.datasetId;
+    state = {
+      ...state,
+      profile: id,
+      settings: sanitizeSettings(read(settingsKey(id))),
+      progress: sanitizeProgress(read(progressKey(datasetId, id)), datasetId),
+    };
     emit();
     scheduleSync();
   },
@@ -392,6 +478,48 @@ export function toggleBookmark(id: string) {
     ...p,
     bookmarks: p.bookmarks.includes(id) ? p.bookmarks.filter((x) => x !== id) : [id, ...p.bookmarks],
   }));
+}
+
+/* ---------- profile management ---------- */
+
+const profileName = (name: string) => name.trim().slice(0, 20);
+
+export function createProfile(name: string) {
+  const n = profileName(name);
+  if (!n) return;
+  // Time-ordered ids keep the list in creation order on every device.
+  const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+  // A fresh learner goes through onboarding to pick a level, but keeps this device's look.
+  write(settingsKey(id), { ...defaultSettings, theme: state.settings.theme });
+  setProfiles([...state.profiles, { id, name: n, at: Date.now() }]);
+  store.useProfile(id);
+}
+
+export function renameProfile(id: string, name: string) {
+  const n = profileName(name);
+  if (!n) return;
+  setProfiles(state.profiles.map((p) => (p.id === id ? { ...p, name: n, at: Date.now() } : p)));
+  scheduleSync();
+}
+
+export function deleteProfile(id: string) {
+  if (id === DEFAULT_PROFILE || id === state.profile) return;
+  const suffix = `@${id}`;
+  const datasets = new Set<string>();
+  try {
+    for (const k of Object.keys(localStorage)) {
+      if (!k.endsWith(suffix)) continue;
+      const m = k.match(/^word-atlas:v2:(.+)@/);
+      if (m) datasets.add(m[1]);
+      localStorage.removeItem(k);
+    }
+  } catch {
+    /* storage unavailable: the tombstone below still hides the profile */
+  }
+  datasets.add(state.progress.datasetId);
+  setProfiles(state.profiles.map((p) => (p.id === id ? { ...p, deleted: true, at: Date.now() } : p)));
+  if (syncAvailable) for (const ds of datasets) void fetch(`${SYNC_API}${remoteKey(ds, id)}`, { method: "DELETE" }).catch(() => null);
+  scheduleSync();
 }
 
 /* ---------- backup ---------- */

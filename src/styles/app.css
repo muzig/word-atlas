@@ -3183,6 +3183,74 @@ code {
   margin-top: 16px;
 }
 
+/* ---------- profiles ---------- */
+
+.profile-list {
+  list-style: none;
+  margin: 14px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.profile-list li {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: 2px 4px 2px 2px;
+}
+.profile-list li.is-on {
+  border-color: var(--line-strong);
+  background: var(--paper-2);
+}
+.profile-pick {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  text-align: left;
+  color: var(--ink);
+}
+.profile-pick span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.profile-list li.is-on .profile-pick {
+  font-weight: 600;
+  cursor: default;
+}
+.profile-dot {
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  border: 1.5px solid var(--line-strong);
+  flex: none;
+}
+.profile-new {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+.profile-new input {
+  flex: 1 1 160px;
+  min-width: 0;
+  padding: 10px 14px;
+  font-size: 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  background: var(--card);
+  color: var(--ink);
+  outline: 0;
+}
+.profile-new input:focus {
+  border-color: var(--ink-3);
+}
+
 /* ---------- about ---------- */
 
 .about-hero {

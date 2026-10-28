@@ -1,5 +1,5 @@
 import type { CardState } from "./srs";
-import type { DayStat, Progress, Settings, TypingRound } from "./store";
+import type { DayStat, Profile, Progress, Settings, TypingRound } from "./store";
 
 /** What a device syncs for one dataset. */
 export interface SyncDoc {
@@ -83,4 +83,15 @@ export function mergeDoc(base: SyncDoc | null, local: SyncDoc, remote: SyncDoc |
   for (const k of Object.keys(settings) as (keyof Settings)[])
     (settings as Record<string, unknown>)[k] = pick(b.settings[k], local.settings[k], remote.settings[k], (l) => l);
   return { progress, settings };
+}
+
+/** Profile lists merge per profile: the newest edit wins, and deletions are kept as tombstones. */
+export function mergeProfiles(local: Profile[], remote: Profile[]): Profile[] {
+  const byId = new Map<string, Profile>();
+  for (const p of [...remote, ...local]) {
+    const prev = byId.get(p.id);
+    if (!prev || p.at > prev.at) byId.set(p.id, p);
+  }
+  // The default profile first, then creation order (ids are time-ordered).
+  return [...byId.values()].sort((a, b) => (a.id === "default" ? -1 : b.id === "default" ? 1 : a.id < b.id ? -1 : 1));
 }

@@ -1,8 +1,20 @@
-import { Download, RotateCcw, Upload } from "lucide-react";
-import { useMemo, useRef } from "react";
+import { Check, Download, Pencil, Plus, RotateCcw, Trash2, Upload } from "lucide-react";
+import { useMemo, useRef, useState } from "react";
 import { useAtlas } from "../atlas/context";
 import { isMastered } from "../store/srs";
-import { dayKey, exportBackup, importBackup, resetProgress, store, useStore, type Settings } from "../store/store";
+import {
+  createProfile,
+  dayKey,
+  DEFAULT_PROFILE,
+  deleteProfile,
+  exportBackup,
+  importBackup,
+  renameProfile,
+  resetProgress,
+  store,
+  useStore,
+  type Settings,
+} from "../store/store";
 import { toast } from "../ui/Toast";
 import { streakOf } from "./Today";
 
@@ -12,6 +24,7 @@ export function Me({ privateAvailable }: { privateAvailable: boolean }) {
   const settings = useStore((s) => s.settings);
   const saveError = useStore((s) => s.saveError);
   const sync = useStore((s) => s.sync);
+  const profileName = useStore((s) => (s.profiles.filter((p) => !p.deleted).length > 1 ? s.profiles.find((p) => p.id === s.profile)?.name : null));
   const file = useRef<HTMLInputElement>(null);
 
   const stats = useMemo(() => {
@@ -52,7 +65,7 @@ export function Me({ privateAvailable }: { privateAvailable: boolean }) {
   return (
     <div className="page me">
       <header className="page-head">
-        <p className="eyebrow">我的</p>
+        <p className="eyebrow">我的{profileName && ` · ${profileName}`}</p>
         <h1 className="display">你的星空</h1>
       </header>
 
@@ -180,6 +193,8 @@ export function Me({ privateAvailable }: { privateAvailable: boolean }) {
           )}
         </section>
 
+        <Profiles />
+
         <section className="panel">
           <h3 className="eyebrow">数据</h3>
           {sync === "off" ? (
@@ -215,6 +230,72 @@ export function Me({ privateAvailable }: { privateAvailable: boolean }) {
         </section>
       </div>
     </div>
+  );
+}
+
+function Profiles() {
+  const profiles = useStore((s) => s.profiles);
+  const active = useStore((s) => s.profile);
+  const [name, setName] = useState("");
+  const list = profiles.filter((p) => !p.deleted);
+  const add = () => {
+    if (!name.trim()) return;
+    createProfile(name);
+    setName("");
+    toast(`已切换到新档案「${name.trim().slice(0, 20)}」`, "ok");
+  };
+
+  return (
+    <section className="panel">
+      <h3 className="eyebrow">学习档案</h3>
+      <p className="muted">每个档案有独立的进度和设置。可以给家人各建一个，也可以按难度分开练，比如「雅思冲刺」和「A2 打基础」。</p>
+      <ul className="profile-list">
+        {list.map((p) => (
+          <li key={p.id} className={p.id === active ? "is-on" : ""}>
+            <button className="profile-pick" onClick={() => p.id !== active && store.useProfile(p.id)} aria-current={p.id === active}>
+              {p.id === active ? <Check size={16} /> : <span className="profile-dot" />}
+              <span>{p.name}</span>
+            </button>
+            <button
+              className="icon-btn"
+              aria-label={`重命名 ${p.name}`}
+              onClick={() => {
+                const n = prompt("档案名称", p.name);
+                if (n) renameProfile(p.id, n);
+              }}
+            >
+              <Pencil size={16} />
+            </button>
+            {p.id !== DEFAULT_PROFILE && p.id !== active && (
+              <button
+                className="icon-btn"
+                aria-label={`删除 ${p.name}`}
+                onClick={() => {
+                  if (confirm(`删除档案「${p.name}」和它的全部学习记录？此操作无法撤销，也会同步到其他设备。`)) {
+                    deleteProfile(p.id);
+                    toast("档案已删除");
+                  }
+                }}
+              >
+                <Trash2 size={16} />
+              </button>
+            )}
+          </li>
+        ))}
+      </ul>
+      <form
+        className="profile-new"
+        onSubmit={(e) => {
+          e.preventDefault();
+          add();
+        }}
+      >
+        <input value={name} maxLength={20} placeholder="新档案名称" onChange={(e) => setName(e.target.value)} />
+        <button className="btn btn-ghost" type="submit" disabled={!name.trim()}>
+          <Plus size={18} /> 新建并切换
+        </button>
+      </form>
+    </section>
   );
 }
 

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mergeDoc, type SyncDoc } from "./merge";
+import { mergeDoc, mergeProfiles, type SyncDoc } from "./merge";
 import { defaultSettings, emptyProgress } from "./store";
 
 const card = (last: number, reps = 1) => ({ due: last + 1, s: 2, d: 5, el: 0, sd: 1, ls: 0, reps, lapses: 0, st: 2 as const, last, seen: 1 });
@@ -52,4 +52,14 @@ test("a setting changed locally wins over an untouched remote", () => {
   const m = mergeDoc(base, doc({}, { accent: "us" }), doc({}, { accent: "uk", sfx: false }));
   assert.equal(m.settings.accent, "us");
   assert.equal(m.settings.sfx, false);
+});
+
+test("profile lists merge per profile, newest edit wins, deletions stick", () => {
+  const def = { id: "default", name: "我", at: 0 };
+  const local = [def, { id: "a1", name: "妈妈", at: 5 }, { id: "b2", name: "冲刺", at: 9, deleted: true }];
+  const remote = [def, { id: "a1", name: "Mom", at: 7 }, { id: "b2", name: "冲刺", at: 3 }, { id: "c3", name: "A2 基础", at: 4 }];
+  const m = mergeProfiles(local, remote);
+  assert.deepEqual(m.map((p) => p.id), ["default", "a1", "b2", "c3"]);
+  assert.equal(m[1].name, "Mom");
+  assert.equal(m[2].deleted, true);
 });
