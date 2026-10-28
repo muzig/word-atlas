@@ -1,0 +1,14 @@
+services:
+  word-atlas:
+    build:
+      context: .
+      args:
+        ATLAS_BASE: ${ATLAS_BASE:-/words/}
+    # CI tags each build with its commit; set IMAGE_TAG in .env to roll back.
+    image: word-atlas:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    # Localhost only: expose it through `tailscale serve` or another reverse proxy.
+    ports:
+      - "127.0.0.1:${ATLAS_PORT:-4182}:4182"
+    volumes:
+      - ./var:/data

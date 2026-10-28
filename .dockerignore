@@ -1,0 +1,13 @@
+.git
+.github
+.local
+node_modules
+dist
+docs
+output
+*.zip
+.DS_Store
+.env
+.env.*
+var
+.gitea

@@ -1,0 +1,59 @@
+# Build and deploy on the Mac mini's host-mode runner (label: macmini).
+# The deploy checkout lives outside the runner workspace so Docker layer cache
+# and the SQLite data in ./var persist between runs.
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: macmini
+    env:
+      DEPLOY_DIR: /Users/muzig/src/self-hosted/word-atlas
+      TOKEN: ${{ gitea.token }}
+      PATH: /usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin
+    steps:
+      - name: Sync deploy checkout
+        run: |
+          set -eu
+          [ -d "$DEPLOY_DIR/.git" ] || git init -q -b main "$DEPLOY_DIR"
+          auth="Authorization: Basic $(printf 'ci:%s' "$TOKEN" | base64 | tr -d '\n')"
+          git -C "$DEPLOY_DIR" -c http.extraHeader="$auth" fetch -q --depth 1 "${GITHUB_SERVER_URL%/}/${GITHUB_REPOSITORY}.git" "$GITHUB_SHA"
+          git -C "$DEPLOY_DIR" reset -q --hard FETCH_HEAD
+          git -C "$DEPLOY_DIR" log --oneline -1
+
+      - name: Build image
+        run: |
+          set -eu
+          cd "$DEPLOY_DIR"
+          tag=$(printf %s "$GITHUB_SHA" | cut -c1-12)
+          IMAGE_TAG=$tag docker compose build
+          docker tag "word-atlas:$tag" word-atlas:latest
+
+      - name: Deploy
+        run: |
+          set -eu
+          cd "$DEPLOY_DIR"
+          tag=$(printf %s "$GITHUB_SHA" | cut -c1-12)
+          mkdir -p var
+          printf 'IMAGE_TAG=%s\n' "$tag" > .env
+          docker compose up -d --no-build
+          for i in $(seq 30); do
+            if curl -fsS -o /dev/null "http://127.0.0.1:4182/api/sync/healthcheck?rev=0"; then
+              echo "word-atlas:$tag is up"
+              break
+            fi
+            [ "$i" = 30 ] && { docker compose logs --tail 50; exit 1; }
+            sleep 2
+          done
+
+      - name: Prune old images (keep 5)
+        run: |
+          docker images word-atlas --format '{{.Tag}}' | grep -v '^latest$' | tail -n +6 | xargs -r -I{} docker rmi "word-atlas:{}" || true

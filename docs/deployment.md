@@ -22,6 +22,14 @@ node scripts/serve.mjs --port 4182 --base /words/ --db ./progress.db
 - 设备之间三方合并：各自学过的词、书签、打字记录都会保留；同一个词取最近一次复习；「清空记录」也会同步到其他设备。
 - 备份：直接复制数据库文件即可；页面里的「导出备份」仍然可用。
 
+### Docker
+
+```bash
+docker compose up -d --build     # 默认子路径 /words/，监听 127.0.0.1:4182，数据在 ./var
+```
+
+镜像把约 700 MB 的插画和音频放在独立的层里，只改代码时重新构建很快。`IMAGE_TAG` 决定运行哪个镜像标签，写在 `.env` 里即可回滚。`.gitea/workflows/deploy.yml` 是在自托管 Gitea runner 上自动构建部署的示例。
+
 ## Nginx 示例
 
 ```nginx
